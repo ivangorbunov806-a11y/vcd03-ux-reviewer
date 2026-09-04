@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX-рецензент сайта</title>
+<!--
+  Страница сервиса. Одна, без сборки и без единого обращения к чужим хостам:
+  шрифты системные, скриптов со стороны нет. Так она открывается всегда, в том
+  числе когда внешние CDN недоступны, и не сливает посетителя третьим лицам.
+-->
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --ink: #16181d;
+    --muted: #5c626e;
+    --line: #e2e3e0;
+    --accent: #b4451f;
+    --good: #1f6f43;
+    --bad: #a3341f;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --panel: #1e2128;
+      --ink: #eceef1;
+      --muted: #9aa1ad;
+      --line: #2c3038;
+      --accent: #e2703f;
+      --good: #5cc08a;
+      --bad: #e2705f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  header { margin-bottom: 1.75rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  .lead { color: var(--muted); margin: 0; }
+  form, .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+  }
+  label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: .3rem; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: .65rem .75rem; font: inherit;
+    color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { margin-bottom: 1rem; }
+  .options { display: flex; align-items: center; gap: .5rem; margin-bottom: 1rem; color: var(--muted); font-size: .9rem; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    padding: .7rem 1.4rem; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff;
+  }
+  button[disabled] { opacity: .55; cursor: progress; }
+  .hint { font-size: .82rem; color: var(--muted); margin-top: .8rem; }
+  .card { margin-top: 1.5rem; }
+  .meta { color: var(--muted); font-size: .88rem; margin-bottom: 1rem; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  h2:first-of-type { margin-top: 0; }
+  ul { margin: 0; padding-left: 1.2rem; }
+  li { margin-bottom: .35rem; }
+  .pros li::marker { color: var(--good); }
+  .cons li::marker { color: var(--bad); }
+  .rec { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem .8rem; margin-bottom: 1rem; }
+  .rec .what { font-weight: 600; }
+  .rec .do { color: var(--muted); }
+  .pri { font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .error { border-color: var(--bad); }
+  .error strong { color: var(--bad); }
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: .82rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>UX-рецензент сайта</h1>
+    <p class="lead">Вставьте адрес страницы — агент прочитает её, сам определит, что это за
+      страница и по каким критериям её судить, и вернёт разбор с пятью рекомендациями.</p>
+  </header>
+
+  <form id="form">
+    <div class="row">
+      <label for="url">Адрес страницы</label>
+      <input type="text" id="url" placeholder="https://example.ru" required
+             autocomplete="url" spellcheck="false">
+    </div>
+    <div class="row">
+      <label for="token">Токен доступа</label>
+      <input type="password" id="token" placeholder="X-API-Token" autocomplete="current-password">
+    </div>
+    <div class="options">
+      <input type="checkbox" id="plan" checked>
+      <label for="plan" style="margin:0">Глубокий разбор — агент сам выбирает критерии (дольше, два запроса к модели)</label>
+    </div>
+    <button type="submit" id="go">Разобрать</button>
+    <p class="hint">Разбор занимает от 7 до 30 секунд. Токен сохраняется только в вашем
+      браузере и никуда больше не отправляется. Программный доступ — <a href="/docs">/docs</a>.</p>
+  </form>
+
+  <div id="out"></div>
+
+  <footer>
+    Учебный проект курса «VIBE-CODING и автономные агенты».
+    Исходники — <a href="https://github.com/ivangorbunov806-a11y/vcd03-ux-reviewer">GitHub</a>.
+  </footer>
+</div>
+
+<script>
+// Токен держим в браузере: вводить его каждый раз неудобно, а на сервер он и так
+// уходит только заголовком запроса.
+const TOKEN_KEY = "ux-reviewer-token";
+const $ = (id) => document.getElementById(id);
+
+const saved = localStorage.getItem(TOKEN_KEY);
+if (saved) $("token").value = saved;
+
+// Экранирование обязательно: в отчёт попадает текст с чужой страницы, и без
+// этого чужая разметка исполнилась бы прямо здесь.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
+
+const list = (items, cls) => items && items.length
+  ? `<ul class="${cls}">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`
+  : `<p class="meta">не найдено</p>`;
+
+function render(r) {
+  const recs = (r.recommendations || []).map((rec, i) => `
+    <div class="rec">
+      <div class="pri">${i + 1} · приоритет: ${esc(rec.priority)}</div>
+      <div class="what">${esc(rec.problem)}</div>
+      <div class="do">→ ${esc(rec.action)}</div>
+    </div>`).join("");
+
+  $("out").innerHTML = `
+    <div class="card">
+      <div class="meta">
+        <strong>${esc(r.title || r.url)}</strong><br>
+        ${esc(r.page_type)} · аудитория: ${esc(r.audience)}<br>
+        целевое действие: ${esc(r.target_action)}
+        ${r.truncated ? "<br>⚠️ страница длинная, разобрана её первая часть" : ""}
+      </div>
+      <p>${esc(r.summary)}</p>
+      <h2>Сильные стороны</h2>${list(r.pros, "pros")}
+      <h2>Слабые места</h2>${list(r.cons, "cons")}
+      <h2>Рекомендации</h2>${recs}
+    </div>`;
+}
+
+function fail(title, detail) {
+  $("out").innerHTML = `<div class="card error"><strong>${esc(title)}</strong>
+    <p class="meta">${esc(detail)}</p></div>`;
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const token = $("token").value.trim();
+  localStorage.setItem(TOKEN_KEY, token);
+
+  $("go").disabled = true;
+  $("go").textContent = "Разбираю…";
+  $("out").innerHTML = `<div class="card meta">Загружаю страницу и советуюсь с моделью…</div>`;
+
+  try {
+    const res = await fetch("/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Token": token },
+      body: JSON.stringify({ url: $("url").value.trim(), with_plan: $("plan").checked })
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok) {
+      render(data);
+    } else if (res.status === 401) {
+      fail("Нужен верный токен", "Заголовок X-API-Token не совпал. Токен выдаёт владелец сервиса.");
+    } else if (res.status === 429) {
+      fail("Слишком много запросов", data.detail || "Разбор платный, поэтому частота ограничена.");
+    } else {
+      fail(`Не получилось (код ${res.status})`, data.detail || "Подробности — в журнале сервиса.");
+    }
+  } catch (err) {
+    fail("Сеть не ответила", String(err));
+  } finally {
+    $("go").disabled = false;
+    $("go").textContent = "Разобрать";
+  }
+});
+</script>
+</body>
+</html>

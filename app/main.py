@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.routers import review
 from app.security import allowed_origins
@@ -85,9 +87,26 @@ async def security_headers(
 app.include_router(review.router)
 
 
-@app.get("/", tags=["служебное"])
-def root() -> dict[str, str]:
-    """Короткая справка: что это за сервис и куда идти дальше."""
+# Страница читается с диска ОДИН раз при старте, а не на каждый запрос: файл
+# не меняется во время работы, и лишнее обращение к диску тут ни к чему.
+INDEX_HTML = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/", response_class=HTMLResponse, tags=["страница"])
+def index() -> HTMLResponse:
+    """
+    Человеческий вход в сервис.
+
+    ⚠️ Раньше здесь отдавался служебный JSON, и в браузере это выглядело как
+    «сервис не открывается»: формально ответ верный, а человеку он ничего не
+    даёт. Справочный JSON никуда не делся — он переехал на /api.
+    """
+    return HTMLResponse(INDEX_HTML)
+
+
+@app.get("/api", tags=["служебное"])
+def api_info() -> dict[str, str]:
+    """Короткая справка для программ: куда обращаться и что нужно."""
     return {
         "service": "UX-рецензент сайта",
         "version": __version__,
