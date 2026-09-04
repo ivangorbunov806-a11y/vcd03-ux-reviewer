@@ -21,3 +21,7 @@ reports/
 .DS_Store
 .idea/
 .vscode/
+
+# Токен доступа к сервису: однажды уехал в публичный репозиторий через git add -A.
+server-token.txt
+*token*.txt

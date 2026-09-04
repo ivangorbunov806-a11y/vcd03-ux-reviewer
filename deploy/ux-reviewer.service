@@ -1,0 +1,58 @@
+[Unit]
+# Веб-сервис UX-рецензента. Держится systemd, а не Docker: на этой машине
+# Docker не установлен, а для одного питоновского процесса он и не нужен —
+# systemd умеет то же самое (автозапуск, перезапуск, лимиты, журнал).
+Description=UX-рецензент сайта — разбор страниц по адресу
+Documentation=https://github.com/ivangorbunov806-a11y/vcd03-ux-reviewer
+After=network-online.target
+Wants=network-online.target
+# Если сервис падает по кругу, systemd прекращает попытки: бесконечный рестарт
+# скрывает поломку и греет процессор вместо того, чтобы её показать.
+# ⚠️ Эти два ключа работают только в [Unit]; в [Service] systemd их принимает
+# молча ("Unknown key ... ignoring") — настройка есть, а действия нет.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=ux-reviewer
+Group=ux-reviewer
+WorkingDirectory=/opt/ux-reviewer/src
+
+# Секреты приходят файлом, а не в командной строке: аргументы процесса видны
+# любому пользователю системы через ps, переменные окружения — нет.
+EnvironmentFile=/opt/ux-reviewer/.env
+
+# ⭐ --host 127.0.0.1, а не 0.0.0.0: сервис НЕ доступен из интернета напрямую.
+# Наружу его пускает только Caddy, который добавляет TLS. Иначе адрес
+# сервер:8000 работал бы в обход сертификата и всех заголовков.
+ExecStart=/opt/ux-reviewer/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+Restart=always
+RestartSec=5
+
+# --- Ограничение прав процесса ---------------------------------------------
+# Смысл: даже если в сервисе найдут дыру, из неё будет мало что видно.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Единственное место, куда сервису можно писать, — его журнал.
+ReadWritePaths=/opt/ux-reviewer/src/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Потолок памяти: на машине 2 ГБ, и один разбор не должен утащить её целиком.
+MemoryMax=600M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ux-reviewer
+
+[Install]
+WantedBy=multi-user.target

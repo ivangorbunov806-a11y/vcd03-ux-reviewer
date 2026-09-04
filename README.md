@@ -88,6 +88,21 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ⚠️ `POST /review` нельзя проверить, просто открыв адрес в браузере, — вернётся
 `405 Method Not Allowed`. Для ручной проверки есть Swagger.
 
+### Живой сервис
+
+Развёрнут и работает круглосуточно: **https://ux.автопилот24.рф**
+
+```bash
+curl https://ux.автопилот24.рф/health
+# {"status":"ok"}
+
+curl -X POST https://ux.автопилот24.рф/review   -H "X-API-Token: <токен>" -H "Content-Type: application/json"   -d '{"url":"https://saranskdekor.ru"}'
+```
+
+Ubuntu 26.04, systemd + Caddy с сертификатом Let's Encrypt, сервис слушает только
+петлю и наружу выходит через Caddy. Как развернуть с нуля, чем проверять и какие
+грабли попались — `deploy/README.md`.
+
 ### Docker
 
 ```bash
@@ -95,6 +110,8 @@ docker compose up --build
 ```
 
 Журнал вынесен наружу томом `./logs`: контейнер пересоздаётся, история разборов остаётся.
+⚠️ Собран по образцу урока, но **не проверялся**: на рабочей машине и на сервере Docker
+не установлен, сервис живёт под systemd.
 
 ## Устройство
 
