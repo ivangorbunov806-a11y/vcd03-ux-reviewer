@@ -161,7 +161,7 @@ cron консольный вывод теряется). В каждой стро
 ## Проверка качества
 
 ```bash
-python -m unittest discover -s tests   # 17 тестов, без сети и без обращений к модели
+python -m unittest discover -s tests   # 34 теста, без сети и без обращений к модели
 python -m ruff check .                 # PEP8
 python -m mypy agent.py ux_reviewer app  # типизация
 ```
