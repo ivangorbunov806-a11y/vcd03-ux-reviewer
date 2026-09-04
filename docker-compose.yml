@@ -1,0 +1,23 @@
+# Современный формат: параметр version убран — он устарел и вызывает
+# предупреждение у свежих версий Docker Compose.
+services:
+  backend:
+    build: .
+    container_name: ux-reviewer
+    ports:
+      - "8000:8000"
+    # Ключ НЕ вшивается в образ: файл подставляется при запуске, поэтому один
+    # и тот же образ безопасно катать на любой сервер.
+    env_file:
+      - .env
+    volumes:
+      # Журнал наружу: контейнер пересоздаётся, история разборов остаётся.
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      # Проверяем не «процесс жив», а «сервис отвечает» — процесс может висеть.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

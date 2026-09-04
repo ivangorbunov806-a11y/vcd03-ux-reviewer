@@ -1,0 +1,23 @@
+# Секреты — главное, что не должно попасть в репозиторий
+.env
+
+# Окружение и кэш Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+
+# Журналы работы
+logs/
+*.log
+
+# Результаты прогонов
+reports/
+*.report.json
+
+# Служебное
+.DS_Store
+.idea/
+.vscode/

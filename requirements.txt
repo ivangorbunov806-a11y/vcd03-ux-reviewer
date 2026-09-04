@@ -1,0 +1,9 @@
+# Версии НЕ прибиты жёстко осознанно: на уроке разобран случай, когда
+# закреплённые версии конфликтовали между собой при пересборке образа.
+openai
+requests
+beautifulsoup4
+python-dotenv
+tenacity
+fastapi
+uvicorn[standard]
