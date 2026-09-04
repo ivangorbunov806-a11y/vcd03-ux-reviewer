@@ -1,16 +1,15 @@
 """
 Ручка разбора страницы.
 
-Задача роутера — перевести ошибки нижних слоёв в понятные коды HTTP и никого
-не пустить без токена. Это защита границы «веб → приложение»: наружу не должно
-улетать необработанное исключение со стек-трейсом, в котором виден внутренний
-адрес провайдера, а иногда и часть ключа.
+Задача роутера — перевести ошибки нижних слоёв в понятные коды HTTP и пропустить
+запрос через охрану (app/security.py). Это защита границы «веб → приложение»:
+наружу не должно улетать необработанное исключение со стек-трейсом, в котором
+виден внутренний адрес провайдера, а иногда и часть ключа.
 
 Коды выбраны осознанно:
   400 — виноват тот, кто прислал адрес (страница не открылась, текста нет,
         адрес запрещён как небезопасный);
-  401 — нет или неверен токен доступа;
-  429 — исчерпан лимит запросов;
+  429 — исчерпан лимит: свой на адрес или общий суточный на весь сервис;
   502 — виноват внешний провайдер модели, повторить позже имеет смысл.
 """
 
@@ -22,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from agent import run
-from app.security import require_token
+from app.security import access_control
 from ux_reviewer.fetcher import FetchError
 from ux_reviewer.llm_client import LLMError
 from ux_reviewer.logging_setup import get_logger
@@ -61,7 +60,7 @@ class ReviewRequest(BaseModel):
 @router.post(
     "/review",
     summary="Разобрать страницу и вернуть UX-отчёт",
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(access_control)],
 )
 def review(request: ReviewRequest) -> dict[str, Any]:
     """Принять адрес, вернуть отчёт. Вся работа — в agent.run()."""

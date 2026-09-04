@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from app.routers import review
-from app.security import allowed_origins
+from app.security import allowed_origins, daily_usage
 from ux_reviewer import __version__
 from ux_reviewer.logging_setup import setup_logging
 
@@ -113,6 +113,19 @@ def api_info() -> dict[str, str]:
         "docs": "/docs",
         "main_endpoint": "POST /review (нужен заголовок X-API-Token)",
     }
+
+
+@app.get("/limits", tags=["служебное"])
+def limits() -> dict[str, int | bool]:
+    """
+    Сколько демонстрационных разборов осталось на сегодня.
+
+    Нужна странице: посетитель должен видеть честное число ДО нажатия кнопки,
+    а не упираться в отказ после ожидания. Ручка открытая и бесплатная —
+    она ничего не считает и к модели не ходит.
+    """
+    used, limit = daily_usage()
+    return {"used": used, "limit": limit, "left": max(0, limit - used)}
 
 
 @app.get("/health", tags=["служебное"])

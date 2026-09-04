@@ -73,6 +73,9 @@
   }
   button[disabled] { opacity: .55; cursor: progress; }
   .hint { font-size: .82rem; color: var(--muted); margin-top: .8rem; }
+  .quota { font-size: .85rem; color: var(--muted); margin: .6rem 0 0; }
+  .quota strong { color: var(--ink); }
+  .quota.empty strong { color: var(--bad); }
   .card { margin-top: 1.5rem; }
   .meta { color: var(--muted); font-size: .88rem; margin-bottom: 1rem; }
   h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
@@ -97,6 +100,7 @@
     <h1>UX-рецензент сайта</h1>
     <p class="lead">Вставьте адрес страницы — агент прочитает её, сам определит, что это за
       страница и по каким критериям её судить, и вернёт разбор с пятью рекомендациями.</p>
+    <p class="quota" id="quota">Проверяю, сколько разборов осталось на сегодня…</p>
   </header>
 
   <form id="form">
@@ -106,16 +110,18 @@
              autocomplete="url" spellcheck="false">
     </div>
     <div class="row">
-      <label for="token">Токен доступа</label>
-      <input type="password" id="token" placeholder="X-API-Token" autocomplete="current-password">
+      <label for="token">Ключ владельца — необязательно</label>
+      <input type="password" id="token" placeholder="оставьте пустым, если у вас его нет"
+             autocomplete="current-password">
     </div>
     <div class="options">
       <input type="checkbox" id="plan" checked>
       <label for="plan" style="margin:0">Глубокий разбор — агент сам выбирает критерии (дольше, два запроса к модели)</label>
     </div>
     <button type="submit" id="go">Разобрать</button>
-    <p class="hint">Разбор занимает от 7 до 30 секунд. Токен сохраняется только в вашем
-      браузере и никуда больше не отправляется. Программный доступ — <a href="/docs">/docs</a>.</p>
+    <p class="hint">Разбор занимает от 7 до 30 секунд и оплачивается владельцем сервиса,
+      поэтому число бесплатных разборов в сутки ограничено. Ключ, если он у вас есть,
+      сохраняется только в вашем браузере. Программный доступ — <a href="/docs">/docs</a>.</p>
   </form>
 
   <div id="out"></div>
@@ -134,6 +140,23 @@ const $ = (id) => document.getElementById(id);
 
 const saved = localStorage.getItem(TOKEN_KEY);
 if (saved) $("token").value = saved;
+
+// Остаток показываем ДО нажатия кнопки: упереться в отказ после тридцати секунд
+// ожидания — худшее, что можно предложить человеку.
+async function showQuota() {
+  try {
+    const r = await fetch("/limits");
+    const q = await r.json();
+    const el = $("quota");
+    el.classList.toggle("empty", q.left === 0);
+    el.innerHTML = q.left > 0
+      ? `Сегодня доступно <strong>${q.left}</strong> из ${q.limit} бесплатных разборов.`
+      : `Бесплатные разборы на сегодня закончились (<strong>${q.limit}</strong> из ${q.limit}). Приходите завтра.`;
+  } catch {
+    $("quota").textContent = "";
+  }
+}
+showQuota();
 
 // Экранирование обязательно: в отчёт попадает текст с чужой страницы, и без
 // этого чужая разметка исполнилась бы прямо здесь.
@@ -192,8 +215,6 @@ $("form").addEventListener("submit", async (e) => {
 
     if (res.ok) {
       render(data);
-    } else if (res.status === 401) {
-      fail("Нужен верный токен", "Заголовок X-API-Token не совпал. Токен выдаёт владелец сервиса.");
     } else if (res.status === 429) {
       fail("Слишком много запросов", data.detail || "Разбор платный, поэтому частота ограничена.");
     } else {
@@ -204,6 +225,7 @@ $("form").addEventListener("submit", async (e) => {
   } finally {
     $("go").disabled = false;
     $("go").textContent = "Разобрать";
+    showQuota();
   }
 });
 </script>

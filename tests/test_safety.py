@@ -13,7 +13,9 @@ IP, которые не требуют обращения к DNS, а веб-сл
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -69,42 +71,88 @@ class TestSSRFProtection(unittest.TestCase):
         assert_url_is_safe("http://8.8.8.8/")
 
 
-class TestAccessToken(unittest.TestCase):
-    """Токен: закрыто по умолчанию, открыто только верным ключом."""
+class TestAccessControl(unittest.TestCase):
+    """
+    Демо-режим: пускаем всех, но под общим потолком.
+
+    ⭐ Проверяем именно то, ради чего потолок существует: что он ОБЩИЙ и что
+    владелец не оказывается заперт вместе с гостями.
+    """
 
     def setUp(self) -> None:
-        self._saved = os.environ.get("APP_TOKEN")
+        self._saved_token = os.environ.get("APP_TOKEN")
+        self._saved_state = security.STATE_FILE
+        # Счётчик суток подменяем на временный файл: тесты не должны трогать
+        # рабочий, иначе прогон тестов съедал бы боевой лимит.
+        self._tmp = tempfile.TemporaryDirectory()
+        security.STATE_FILE = Path(self._tmp.name) / "usage.json"
         security._hits.clear()
+        os.environ["DAILY_LIMIT"] = "2"
+        os.environ["RATE_LIMIT_PER_HOUR"] = "50"
 
     def tearDown(self) -> None:
-        if self._saved is None:
+        security.STATE_FILE = self._saved_state
+        self._tmp.cleanup()
+        security._hits.clear()
+        for key in ("DAILY_LIMIT", "RATE_LIMIT_PER_HOUR"):
+            os.environ.pop(key, None)
+        if self._saved_token is None:
             os.environ.pop("APP_TOKEN", None)
         else:
-            os.environ["APP_TOKEN"] = self._saved
-        security._hits.clear()
+            os.environ["APP_TOKEN"] = self._saved_token
 
-    def test_missing_config_closes_the_door(self) -> None:
-        # ⭐ Fail-closed: забытая настройка не должна открывать сервис всем.
-        os.environ.pop("APP_TOKEN", None)
+    def test_guest_without_token_is_allowed(self) -> None:
+        # Сервис демонстрационный: посторонний обязан пройти, пока есть бюджет.
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request(), None)
+
+    def test_daily_budget_is_shared_by_everyone(self) -> None:
+        # ⭐ Главная проверка: потолок общий, а не на каждый адрес отдельно.
+        # Иначе сто адресов дали бы сто лимитов и расход стал бы неограничен.
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request("8.8.8.8"), None)
+        security.access_control(fake_request("9.9.9.9"), None)
         with self.assertRaises(HTTPException) as ctx:
-            security.require_token(fake_request(), None)
-        self.assertEqual(ctx.exception.status_code, 503)
+            security.access_control(fake_request("1.1.1.1"), None)
+        self.assertEqual(ctx.exception.status_code, 429)
 
-    def test_wrong_token_rejected(self) -> None:
-        os.environ["APP_TOKEN"] = "правильный-ключ"
-        with self.assertRaises(HTTPException) as ctx:
-            security.require_token(fake_request(), "неправильный")
-        self.assertEqual(ctx.exception.status_code, 401)
+    def test_owner_passes_exhausted_budget(self) -> None:
+        # Владелец не должен оказаться заперт в день, когда демо разобрали.
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request("8.8.8.8"), None)
+        security.access_control(fake_request("9.9.9.9"), None)
+        security.access_control(fake_request("1.1.1.1"), "ключ-владельца")
 
-    def test_absent_token_rejected(self) -> None:
-        os.environ["APP_TOKEN"] = "правильный-ключ"
-        with self.assertRaises(HTTPException) as ctx:
-            security.require_token(fake_request(), None)
-        self.assertEqual(ctx.exception.status_code, 401)
+    def test_owner_does_not_spend_guest_budget(self) -> None:
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request(), "ключ-владельца")
+        used, _ = security.daily_usage()
+        self.assertEqual(used, 0)
 
-    def test_correct_token_passes(self) -> None:
-        os.environ["APP_TOKEN"] = "правильный-ключ"
-        security.require_token(fake_request(), "правильный-ключ")  # не должно бросить
+    def test_wrong_token_falls_back_to_guest(self) -> None:
+        # Неверный токен больше не отказ, а понижение до гостя — но бюджет он
+        # тратит, иначе перебором токенов можно было бы обойти потолок.
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request(), "неправильный")
+        used, _ = security.daily_usage()
+        self.assertEqual(used, 1)
+
+    def test_counter_survives_restart(self) -> None:
+        # ⭐ Счётчик в файле, а не в памяти: у сервиса Restart=always, и потолок
+        # в памяти обходился бы обычным падением процесса.
+        os.environ["APP_TOKEN"] = "ключ-владельца"
+        security.access_control(fake_request(), None)
+        used_before, _ = security.daily_usage()
+        security._hits.clear()  # имитируем перезапуск: память очищена, файл цел
+        used_after, _ = security.daily_usage()
+        self.assertEqual(used_before, used_after)
+        self.assertEqual(used_after, 1)
+
+    def test_broken_state_file_does_not_crash(self) -> None:
+        security.STATE_FILE.write_text("{это не json", encoding="utf-8")
+        used, limit = security.daily_usage()
+        self.assertEqual(used, 0)
+        self.assertEqual(limit, 2)
 
 
 class TestRateLimit(unittest.TestCase):
