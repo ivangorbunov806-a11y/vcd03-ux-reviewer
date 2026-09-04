@@ -11,15 +11,20 @@
 
 ⚠️ POST-ручку нельзя проверить, просто открыв её адрес в браузере — будет
 405 Method Not Allowed. Для проверки руками есть Swagger.
+
+Охрана доступа (токен, лимит частоты, список источников) — в app/security.py.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import review
+from app.security import allowed_origins
 from ux_reviewer import __version__
 from ux_reviewer.logging_setup import setup_logging
 
@@ -36,21 +41,46 @@ app = FastAPI(
     title="UX-рецензент сайта",
     description=(
         "Автономный агент: по адресу страницы возвращает UX-отчёт — "
-        "сильные стороны, слабые места и пять рекомендаций."
+        "сильные стороны, слабые места и пять рекомендаций.\n\n"
+        "Разбор требует заголовка `X-API-Token`."
     ),
     version=__version__,
 )
 
-# CORS открыт полностью, потому что сервис учебный и фронтенд может быть запущен
-# с любого адреса. ⚠️ Для продакшена сюда прописывается конкретный домен:
-# allow_origins=["https://ваш-домен"] — иначе к API сможет ходить любой сайт.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS по списку из переменной ALLOWED_ORIGINS. Пустой список = доступа из
+# браузеров нет вообще, и это правильное значение по умолчанию: сервис
+# вызывается скриптами с токеном, а не чужими веб-страницами.
+origins = allowed_origins()
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["POST", "GET"],
+        allow_headers=["X-API-Token", "Content-Type"],
+    )
+    log.info("CORS разрешён для: %s", ", ".join(origins))
+else:
+    log.info("CORS закрыт (ALLOWED_ORIGINS пуст) — обращения только вне браузера")
+
+
+@app.middleware("http")
+async def security_headers(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """
+    Заголовки, отключающие типовые способы навредить через браузер.
+
+    Мелочь по объёму, но ставится один раз и работает всегда: запрет угадывания
+    типа содержимого, запрет показа сервиса в чужом фрейме и просьба не слать
+    наш адрес третьим сторонам.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
 
 app.include_router(review.router)
 
@@ -62,11 +92,17 @@ def root() -> dict[str, str]:
         "service": "UX-рецензент сайта",
         "version": __version__,
         "docs": "/docs",
-        "main_endpoint": "POST /review",
+        "main_endpoint": "POST /review (нужен заголовок X-API-Token)",
     }
 
 
 @app.get("/health", tags=["служебное"])
 def health() -> dict[str, str]:
-    """Проверка живости для Docker и мониторинга: отвечает ли процесс вообще."""
+    """
+    Проверка живости для systemd и мониторинга: отвечает ли процесс вообще.
+
+    Осознанно БЕЗ токена и без обращения к модели: проверка живости не должна
+    ни стоить денег, ни зависеть от внешнего провайдера — иначе сторож начнёт
+    перезапускать здоровый сервис из-за чужой аварии.
+    """
     return {"status": "ok"}

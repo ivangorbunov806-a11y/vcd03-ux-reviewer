@@ -5,17 +5,22 @@
 касается модели, лежит слоем выше и про HTTP ничего не знает — благодаря этому
 разбор промптов отлаживается на сохранённом тексте, без обращений в сеть.
 
-⚠️ Главная опасность этого слоя — ТИХИЙ УСПЕХ: сервер ответил 200, парсер
-отработал, а текста нет (страница собирается скриптами в браузере). Дальше такой
-пустой текст ушёл бы в модель, та бы честно нафантазировала UX-отчёт ни о чём,
-и подделка выглядела бы как рабочий результат. Поэтому объём текста проверяется
-явно и мало текста = ошибка, а не «пустой, но успешный» ответ.
+⚠️ Опасность первая — ТИХИЙ УСПЕХ: сервер ответил 200, парсер отработал, а текста
+нет (страница собирается скриптами в браузере). Дальше такой пустой текст ушёл бы
+в модель, та бы честно нафантазировала UX-отчёт ни о чём, и подделка выглядела бы
+как рабочий результат. Поэтому объём текста проверяется явно.
+
+⚠️ Опасность вторая — SSRF: адрес приходит от постороннего человека, а ходит по
+нему НАШ сервер, изнутри периметра. Проверка вынесена в safety.py, здесь она
+применяется к каждому шагу цепочки переходов.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -27,6 +32,7 @@ from tenacity import (
 )
 
 from ux_reviewer.logging_setup import get_logger
+from ux_reviewer.safety import MAX_REDIRECTS, UnsafeURLError, assert_url_is_safe
 
 log = get_logger("fetch")
 
@@ -42,6 +48,11 @@ MIN_TEXT_LENGTH: Final[int] = 200
 
 # Больше 40 тыс. знаков в модель не отдаём: смысла нет, а токены платные.
 MAX_TEXT_LENGTH: Final[int] = 40_000
+
+# ⚠️ Потолок СКАЧИВАНИЯ. Без него чужой адрес может отдавать поток бесконечно
+# долго (так устроены ловушки для краулеров) — память сервера кончится раньше,
+# чем терпение. 5 МБ с запасом покрывают любую честную страницу.
+MAX_DOWNLOAD_BYTES: Final[int] = 5 * 1024 * 1024
 
 # Теги, которые к содержанию отношения не имеют и только зашумляют разбор.
 NOISE_TAGS: Final[tuple[str, ...]] = (
@@ -80,29 +91,108 @@ class PageContent:
     wait=wait_exponential(multiplier=2, min=2, max=15),
     reraise=True,
 )
-def _download(url: str) -> requests.Response:
-    """Скачивание с повторами: сеть моргает чаще, чем кажется."""
+def _download_once(url: str) -> requests.Response:
+    """
+    Одно скачивание с повторами при сетевых сбоях.
+
+    ⚠️ allow_redirects=False стоит НЕ для удобства, а ради безопасности:
+    библиотека пошла бы по переходу сама, в том числе на 127.0.0.1, и проверка
+    адреса осталась бы позади. Переходы обрабатываются вызывающей функцией —
+    с повторной проверкой каждого шага.
+    """
     log.info("Загружаю страницу: %s", url)
-    response = requests.get(
+    return requests.get(
         url,
         timeout=REQUEST_TIMEOUT,
         headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"},
+        allow_redirects=False,
+        stream=True,
     )
-    response.raise_for_status()
-    return response
+
+
+def _read_limited(response: requests.Response) -> bytes:
+    """
+    Прочитать тело ответа, оборвав чтение на потолке.
+
+    Считаем ФАКТИЧЕСКИЕ байты, а не верим заголовку Content-Length: его можно
+    написать любой, а можно и вовсе не прислать.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=8192):
+        total += len(chunk)
+        if total > MAX_DOWNLOAD_BYTES:
+            log.warning("Превышен потолок скачивания %d байт — чтение оборвано", MAX_DOWNLOAD_BYTES)
+            raise FetchError(
+                f"Страница больше {MAX_DOWNLOAD_BYTES // 1024 // 1024} МБ — такие не разбираем"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode(response: requests.Response, body: bytes) -> str:
+    """
+    Превратить байты в текст, определив кодировку.
+
+    Порядок важен: заголовок сервера → объявление внутри HTML → utf-8 как
+    последняя попытка. Русские сайты регулярно врут в заголовке (классика —
+    объявленный windows-1251 при фактическом utf-8), поэтому errors="replace":
+    отдельный битый символ не должен ронять весь разбор.
+    """
+    encoding = response.encoding
+    if not encoding or encoding.lower() == "iso-8859-1":
+        match = re.search(rb'charset=["\']?([\w-]+)', body[:4096], re.IGNORECASE)
+        encoding = match.group(1).decode("ascii", "ignore") if match else "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        # Сервер назвал кодировку, которой не существует, — не редкость.
+        log.warning("Неизвестная кодировка %r, читаю как utf-8", encoding)
+        return body.decode("utf-8", errors="replace")
+
+
+def _download(url: str) -> tuple[requests.Response, bytes]:
+    """
+    Скачать страницу, проверяя безопасность КАЖДОГО шага цепочки переходов.
+
+    Граница «интернет → наш сервер»: перед каждым запросом адрес резолвится и
+    сверяется со списком запретов (см. safety.py).
+    """
+    current = url
+    for hop in range(MAX_REDIRECTS + 1):
+        try:
+            assert_url_is_safe(current)
+        except UnsafeURLError as exc:
+            raise FetchError(str(exc)) from exc
+
+        response = _download_once(current)
+
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location", "")
+            response.close()
+            if not location:
+                raise FetchError("Сервер ответил переходом, но не сказал куда")
+            current = urljoin(current, location)
+            log.info("Переход %d из %d: %s", hop + 1, MAX_REDIRECTS, current)
+            continue
+
+        response.raise_for_status()
+        return response, _read_limited(response)
+
+    raise FetchError(f"Слишком много переходов (больше {MAX_REDIRECTS}) — похоже на петлю")
 
 
 def fetch_page(url: str) -> PageContent:
     """
     Скачать страницу и достать из неё заголовок и текст.
 
-    :raises FetchError: адрес не открылся, отдал не HTML или текста слишком мало.
+    :raises FetchError: адрес запрещён, не открылся, отдал не HTML или текста мало.
     """
     if not url.startswith(("http://", "https://")):
         raise FetchError(f"Адрес должен начинаться с http:// или https://, получено: {url!r}")
 
     try:
-        response = _download(url)
+        response, body = _download(url)
     except requests.RequestException as exc:
         log.error("Страница не загрузилась: %s (%s)", url, exc)
         raise FetchError(f"Не удалось загрузить страницу: {exc}") from exc
@@ -114,12 +204,7 @@ def fetch_page(url: str) -> PageContent:
             f"По адресу лежит не HTML, а {content_type or 'неизвестный тип'} — разбирать нечего"
         )
 
-    # requests угадывает кодировку по заголовкам и иногда ошибается на русских
-    # сайтах; apparent_encoding смотрит в само содержимое и надёжнее.
-    if not response.encoding or response.encoding.lower() == "iso-8859-1":
-        response.encoding = response.apparent_encoding
-
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(_decode(response, body), "html.parser")
 
     for tag in soup(list(NOISE_TAGS)):
         tag.decompose()
@@ -161,6 +246,4 @@ def fetch_page(url: str) -> PageContent:
         title[:80],
         len(text),
     )
-    return PageContent(
-        url=url, title=title, text=text, original_length=original_length
-    )
+    return PageContent(url=url, title=title, text=text, original_length=original_length)

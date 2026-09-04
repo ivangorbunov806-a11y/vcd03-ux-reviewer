@@ -1,13 +1,16 @@
 """
 Ручка разбора страницы.
 
-Единственная задача роутера — перевести ошибки нижних слоёв в понятные коды HTTP.
-Это и есть защита границы «веб → приложение»: наружу не должно улетать
-необработанное исключение со стек-трейсом, в котором виден внутренний адрес
-провайдера, а иногда и часть ключа.
+Задача роутера — перевести ошибки нижних слоёв в понятные коды HTTP и никого
+не пустить без токена. Это защита границы «веб → приложение»: наружу не должно
+улетать необработанное исключение со стек-трейсом, в котором виден внутренний
+адрес провайдера, а иногда и часть ключа.
 
 Коды выбраны осознанно:
-  400 — виноват тот, кто прислал адрес (страница не открылась, текста нет);
+  400 — виноват тот, кто прислал адрес (страница не открылась, текста нет,
+        адрес запрещён как небезопасный);
+  401 — нет или неверен токен доступа;
+  429 — исчерпан лимит запросов;
   502 — виноват внешний провайдер модели, повторить позже имеет смысл.
 """
 
@@ -15,10 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from agent import run
+from app.security import require_token
 from ux_reviewer.fetcher import FetchError
 from ux_reviewer.llm_client import LLMError
 from ux_reviewer.logging_setup import get_logger
@@ -31,7 +35,14 @@ router = APIRouter(tags=["разбор"])
 class ReviewRequest(BaseModel):
     """Тело запроса: адрес страницы и способ разбора."""
 
-    url: str = Field(..., description="Адрес страницы, начиная с http:// или https://")
+    # max_length не для красоты: без ограничения в поле можно прислать мегабайт
+    # текста, и он будет разбираться раньше, чем сработает любая проверка.
+    url: str = Field(
+        ...,
+        min_length=8,
+        max_length=2000,
+        description="Адрес страницы, начиная с http:// или https://",
+    )
     with_plan: bool = Field(
         True,
         description=(
@@ -47,7 +58,11 @@ class ReviewRequest(BaseModel):
     }
 
 
-@router.post("/review", summary="Разобрать страницу и вернуть UX-отчёт")
+@router.post(
+    "/review",
+    summary="Разобрать страницу и вернуть UX-отчёт",
+    dependencies=[Depends(require_token)],
+)
 def review(request: ReviewRequest) -> dict[str, Any]:
     """Принять адрес, вернуть отчёт. Вся работа — в agent.run()."""
     log.info("HTTP-запрос на разбор: %s", request.url)
@@ -57,9 +72,12 @@ def review(request: ReviewRequest) -> dict[str, Any]:
         log.warning("Отказ на границе загрузки: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMError as exc:
+        # ⚠️ Наружу отдаём общую формулировку, подробности — только в журнал:
+        # текст ошибки провайдера иногда содержит служебные адреса и обрывки
+        # запроса, и посторонним их видеть незачем.
         log.error("Отказ на границе модели: %s", exc)
         raise HTTPException(
-            status_code=502, detail=f"Модель недоступна или ответила некорректно: {exc}"
+            status_code=502, detail="Модель недоступна или ответила некорректно"
         ) from exc
 
     return report.to_dict()
