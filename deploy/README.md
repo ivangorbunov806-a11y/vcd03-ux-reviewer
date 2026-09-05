@@ -34,7 +34,8 @@ install -d -o ux-reviewer -g ux-reviewer /opt/ux-reviewer/src/logs
 
 # 3. Настройки. ⚠️ Строго UTF-8 и переводы строк LF
 cp /opt/ux-reviewer/src/.env.example /opt/ux-reviewer/.env
-# заполнить API_KEY, сгенерировать APP_TOKEN, поставить TRUST_PROXY=true
+# заполнить API_KEY; задать DAILY_LIMIT (потолок расходов) и TRUST_PROXY=true;
+# APP_TOKEN — ключ владельца, он обходит суточный потолок
 chmod 600 /opt/ux-reviewer/.env && chown ux-reviewer:ux-reviewer /opt/ux-reviewer/.env
 
 # 4. Сервис
@@ -63,7 +64,8 @@ git -C /opt/ux-reviewer/src pull && systemctl restart ux-reviewer
 | `systemctl is-active ux-reviewer caddy` | `active` дважды |
 | `ss -tlnp \| grep 8000` | слушает **127.0.0.1**, не `0.0.0.0` |
 | `curl https://ux.автопилот24.рф/health` | `{"status":"ok"}` |
-| POST `/review` без токена | **401** |
+| POST `/review` без токена | **200** — сервис открыт всем |
+| `curl https://ux.автопилот24.рф/limits` | остаток бесплатных разборов на сегодня |
 | POST `/review` с адресом `http://169.254.169.254/` | **400**, отказ по SSRF |
 | `curl -I` на любой адрес | заголовки HSTS, nosniff, DENY, no-referrer |
 | `systemctl is-enabled ux-reviewer caddy` | `enabled` дважды — переживёт перезагрузку |
@@ -76,9 +78,13 @@ git -C /opt/ux-reviewer/src pull && systemctl restart ux-reviewer
 разных адресов (`rust_sniffer`, `ForestEngine` и другие сканеры). Новые домены
 находят через публичные журналы выданных сертификатов за минуты.
 
-Отсюда обязательный минимум, который уже настроен: токен `X-API-Token`, лимит
-20 разборов в час с адреса, закрытый CORS, `ProtectSystem=strict` и потолок памяти
-600 МБ в юните.
+Отсюда обязательный минимум, который уже настроен: ⭐ **общий суточный потолок на
+весь сервис** (`DAILY_LIMIT`, счётчик в файле — иначе он обходился бы перезапуском),
+лимит 20 разборов в час с адреса, ключ владельца в обход потолка, закрытый CORS,
+`ProtectSystem=strict` и потолок памяти 600 МБ в юните.
+
+⚠️ Лимит на адрес общим потолком НЕ является: у ботов адресов много, и сто адресов
+дали бы сто лимитов. Именно поэтому расходы ограничивает отдельный счётчик на сервис.
 
 ## Грабли этого развёртывания
 
